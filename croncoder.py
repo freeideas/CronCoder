@@ -11,8 +11,46 @@ import signal
 import atexit
 import yaml
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
+
+
+def setup_logging():
+    """Setup logging configuration with file and console output"""
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(os.path.dirname(__file__), 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Setup logger
+    logger = logging.getLogger('croncoder')
+    logger.setLevel(logging.INFO)
+    
+    # Console handler
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    console_handler.setFormatter(console_formatter)
+    
+    # File handler with rotation (10MB max, keep 5 backups)
+    log_file = os.path.join(log_dir, 'croncoder.log')
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=10*1024*1024, backupCount=5
+    )
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+    file_handler.setFormatter(file_formatter)
+    
+    # Add handlers
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    
+    return logger
+
+
+# Initialize logger
+logger = setup_logging()
 
 
 class LockFile:
@@ -107,14 +145,14 @@ def get_open_issues(repo_path):
     success, stdout, stderr = run_command("gh issue list --state open --json number,title", cwd=repo_path)
     
     if not success:
-        print(f"Failed to get issues: {stderr}")
+        logger.error(f"Failed to get issues: {stderr}")
         return []
     
     try:
         issues = json.loads(stdout)
         return issues
     except json.JSONDecodeError:
-        print(f"Failed to parse issues JSON: {stdout}")
+        logger.error(f"Failed to parse issues JSON: {stdout}")
         return []
 
 
@@ -125,7 +163,7 @@ def is_git_repository(path):
 
 def refresh_repository(repo_path):
     """Pull latest changes from main branch"""
-    print(f"Refreshing repository: {repo_path}")
+    logger.info(f"Refreshing repository: {repo_path}")
     
     # Stash any local changes
     run_command("git stash", cwd=repo_path)
@@ -135,13 +173,13 @@ def refresh_repository(repo_path):
     if not success:
         success, _, _ = run_command("git checkout master", cwd=repo_path)
         if not success:
-            print("Failed to checkout main/master branch")
+            logger.error("Failed to checkout main/master branch")
             return False
     
     # Pull latest changes
     success, _, stderr = run_command("git pull", cwd=repo_path)
     if not success:
-        print(f"Failed to pull latest changes: {stderr}")
+        logger.error(f"Failed to pull latest changes: {stderr}")
         return False
     
     return True
@@ -187,16 +225,16 @@ def run_tests(repo_path):
     test_command = discover_test_command(repo_path)
     
     if not test_command:
-        print("No test command found, skipping tests")
+        logger.info("No test command found, skipping tests")
         return True
     
-    print(f"Running tests with: {test_command}")
+    logger.info(f"Running tests with: {test_command}")
     success, stdout, stderr = run_command(test_command, cwd=repo_path)
     
     if success:
-        print("Tests passed!")
+        logger.info("Tests passed!")
     else:
-        print(f"Tests failed:\n{stderr}")
+        logger.error(f"Tests failed:\n{stderr}")
     
     return success
 
@@ -206,23 +244,23 @@ def commit_and_push_fix(repo_path, issue_number):
     # Add all changes
     success, _, stderr = run_command("git add -A", cwd=repo_path)
     if not success:
-        print(f"Failed to add changes: {stderr}")
+        logger.error(f"Failed to add changes: {stderr}")
         return False
     
     # Create commit message
     commit_message = f"Fix issue #{issue_number} (automated by CronCoder)"
     success, _, stderr = run_command(f'git commit -m "{commit_message}"', cwd=repo_path)
     if not success:
-        print(f"Failed to commit: {stderr}")
+        logger.error(f"Failed to commit: {stderr}")
         return False
     
     # Push changes
     success, _, stderr = run_command("git push", cwd=repo_path)
     if not success:
-        print(f"Failed to push: {stderr}")
+        logger.error(f"Failed to push: {stderr}")
         return False
     
-    print(f"Successfully pushed fix for issue #{issue_number}")
+    logger.info(f"Successfully pushed fix for issue #{issue_number}")
     return True
 
 
@@ -234,9 +272,9 @@ def mark_issue_resolved(repo_path, issue_number):
     )
     
     if success:
-        print(f"Marked issue #{issue_number} as resolved")
+        logger.info(f"Marked issue #{issue_number} as resolved")
     else:
-        print(f"Failed to close issue: {stderr}")
+        logger.error(f"Failed to close issue: {stderr}")
     
     return success
 
@@ -246,11 +284,11 @@ def process_issue(repo_path, issue):
     issue_number = issue['number']
     issue_title = issue['title']
     
-    print(f"\nProcessing issue #{issue_number}: {issue_title}")
+    logger.info(f"Processing issue #{issue_number}: {issue_title}")
     
     # Refresh repository to latest state
     if not refresh_repository(repo_path):
-        print("Failed to refresh repository")
+        logger.error("Failed to refresh repository")
         return False
     
     # Convert path for Windows if needed
@@ -260,7 +298,7 @@ def process_issue(repo_path, issue):
     claude_prompt = f"Please fix GitHub issue #{issue_number}: {issue_title}. Run any necessary tests to verify your fix."
     
     # Run Claude Code in the repository directory
-    print(f"Running Claude Code to fix issue #{issue_number}...")
+    logger.info(f"Running Claude Code to fix issue #{issue_number}...")
     
     # Use full path to claude executable with non-interactive mode
     claude_path = "/home/human/.claude/local/claude"
@@ -278,12 +316,12 @@ def process_issue(repo_path, issue):
         os.chdir(original_cwd)
     
     if not success:
-        print(f"Claude Code failed to fix issue: {stderr}")
+        logger.error(f"Claude Code failed to fix issue: {stderr}")
         return False
     
     # Run tests to verify the fix
     if not run_tests(repo_path):
-        print("Tests failed after fix, reverting changes")
+        logger.warning("Tests failed after fix, reverting changes")
         run_command("git checkout .", cwd=repo_path)
         return False
     
@@ -312,17 +350,17 @@ def scan_repositories(repos_dir, failed_issues=None):
         if not os.path.isdir(repo_path) or not is_git_repository(repo_path):
             continue
         
-        print(f"\nChecking repository: {item}")
+        logger.info(f"Checking repository: {item}")
         
         # Get open issues
         issues = get_open_issues(repo_path)
         
         if not issues:
-            print(f"No open issues found in {item}")
+            logger.info(f"No open issues found in {item}")
             continue
         
         issues_found = True
-        print(f"Found {len(issues)} open issues in {item}")
+        logger.info(f"Found {len(issues)} open issues in {item}")
         
         # Process each issue
         for issue in issues:
@@ -330,7 +368,7 @@ def scan_repositories(repos_dir, failed_issues=None):
             
             # Skip if we've already failed this issue
             if issue_key in failed_issues:
-                print(f"Skipping previously failed issue #{issue['number']}")
+                logger.info(f"Skipping previously failed issue #{issue['number']}")
                 continue
             
             try:
@@ -338,7 +376,7 @@ def scan_repositories(repos_dir, failed_issues=None):
                 if not success:
                     failed_issues.add(issue_key)
             except Exception as e:
-                print(f"Error processing issue #{issue['number']}: {e}")
+                logger.error(f"Error processing issue #{issue['number']}: {e}")
                 failed_issues.add(issue_key)
                 continue
     
@@ -352,7 +390,7 @@ def main():
     config_path = os.path.join(os.path.dirname(__file__), config_file)
     
     if not os.path.exists(config_path):
-        print("Error: config.yaml not found")
+        logger.error(f"Error: {config_file} not found")
         sys.exit(1)
     
     with open(config_path, 'r') as f:
@@ -363,17 +401,17 @@ def main():
     
     # Verify repos directory exists
     if not os.path.exists(repos_dir):
-        print(f"Error: Repository directory not found: {repos_dir}")
+        logger.error(f"Error: Repository directory not found: {repos_dir}")
         sys.exit(1)
     
     # Acquire lock
     lock = LockFile()
     if not lock.acquire():
-        print("Another instance of CronCoder is already running")
+        logger.info("Another instance of CronCoder is already running")
         sys.exit(0)
     
-    print(f"CronCoder started at {datetime.now()}")
-    print(f"Monitoring repositories in: {repos_dir}")
+    logger.info(f"CronCoder started at {datetime.now()}")
+    logger.info(f"Monitoring repositories in: {repos_dir}")
     
     try:
         # Track failed issues across loops
@@ -384,27 +422,27 @@ def main():
             issues_found, failed_issues = scan_repositories(repos_dir, failed_issues)
             
             if not issues_found:
-                print(f"\nNo open issues found. Sleeping for {sleep_time} minutes...")
+                logger.info(f"No open issues found. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
                 break  # Exit after sleep
             
             # Check if all issues have failed
             if failed_issues and not any(issue for issue in issues_found):
-                print(f"\nAll remaining issues have failed. Sleeping for {sleep_time} minutes...")
+                logger.info(f"All remaining issues have failed. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
                 break
             
             # If issues were found and processed, loop again immediately
-            print("\nIssues were processed, checking for more...")
+            logger.info("Issues were processed, checking for more...")
     
     except KeyboardInterrupt:
-        print("\nCronCoder interrupted by user")
+        logger.info("CronCoder interrupted by user")
     except Exception as e:
-        print(f"\nCronCoder error: {e}")
+        logger.error(f"CronCoder error: {e}")
         raise
     finally:
         lock.release()
-        print(f"\nCronCoder finished at {datetime.now()}")
+        logger.info(f"CronCoder finished at {datetime.now()}")
 
 
 if __name__ == "__main__":

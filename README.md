@@ -20,6 +20,7 @@ The script ensures only one instance runs at a time using a PID-based lock file 
 - **Automated Issue Resolution**: Leverages Claude Code in full agentic mode to analyze and fix issues
 - **Test Verification**: Automatically discovers and runs project tests before committing
 - **Continuous Processing**: Loops until no open issues remain, then sleeps
+- **Comprehensive Logging**: Logs all activities to both console and rotating log files
 
 ## Prerequisites
 
@@ -46,6 +47,8 @@ repos_directory: /path/to/repos  # Directory containing GitHub repositories
 .
 ├── croncoder.py      # Main script
 ├── config.yaml       # Configuration file
+├── logs/             # Log files (created automatically)
+│   └── croncoder.log # Main log file (rotates at 10MB)
 └── README.md         # This file
 ```
 
@@ -92,6 +95,25 @@ Or set up as a cron job to run periodically:
 - Run with appropriate file system permissions
 - Consider the security implications of automated code changes
 - Review Claude Code's changes before deploying to production
+
+## Logging
+
+CronCoder maintains comprehensive logs of all activities:
+
+- **Console Output**: All log messages are displayed in the terminal when running interactively
+- **Log Files**: Stored in the `logs/` directory with automatic rotation
+  - Main log file: `logs/croncoder.log`
+  - Rotates at 10MB, keeping 5 backup files
+  - Includes timestamps, log levels, and detailed messages
+
+Example log entries:
+```
+2025-05-27 22:30:15,123 - INFO - CronCoder started at 2025-05-27 22:30:15.123456
+2025-05-27 22:30:15,234 - INFO - Monitoring repositories in: /mnt/c/repos
+2025-05-27 22:30:15,345 - INFO - Checking repository: myproject
+2025-05-27 22:30:16,456 - INFO - Found 2 open issues in myproject
+2025-05-27 22:30:16,567 - INFO - Processing issue #42: Fix memory leak
+```
 
 ## Error Handling
 

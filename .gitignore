@@ -21,6 +21,7 @@ build/
 croncoder.lock
 config.yaml
 *.log
+logs/
 
 # OS
 .DS_Store

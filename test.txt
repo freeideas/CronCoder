@@ -1,0 +1,2 @@
+This is a test file created to verify the CronCoder system is working properly.
+Created for GitHub issue #1.

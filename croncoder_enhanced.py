@@ -511,18 +511,51 @@ def process_issue(repo_path, issue):
         success, stdout, stderr = run_command(claude_cmd, capture_output=True, timeout=1800)  # 30 minute timeout
         
         if not success:
-            logger.error(f"Claude Code failed with exit code")
-            logger.error(f"Claude stderr: {stderr[:1000]}")  # Log first 1000 chars of error
+            logger.error(f"Claude Code failed to fix issue #{issue_number}")
+            logger.error(f"Claude command: {claude_cmd[:100]}...")
+            logger.error(f"Exit code: {success}")
+            logger.error(f"Claude stdout length: {len(stdout)} chars")
+            logger.error(f"Claude stderr: {stderr[:2000]}")  # Log first 2000 chars of error
+            
+            # Save full output for debugging
+            debug_file = os.path.join(os.path.dirname(__file__), 'logs', f'claude_error_{issue_number}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
+            try:
+                with open(debug_file, 'w') as f:
+                    f.write(f"Issue: #{issue_number}\n")
+                    f.write(f"Command: {claude_cmd}\n")
+                    f.write(f"Working Directory: {repo_path}\n")
+                    f.write(f"Exit Code: {success}\n")
+                    f.write(f"\n--- STDOUT ({len(stdout)} chars) ---\n")
+                    f.write(stdout)
+                    f.write(f"\n--- STDERR ({len(stderr)} chars) ---\n")
+                    f.write(stderr)
+                logger.info(f"Full Claude output saved to: {debug_file}")
+            except Exception as e:
+                logger.error(f"Failed to save debug output: {e}")
             
             # Check for specific error patterns
-            if "authentication" in stderr.lower() or "unauthorized" in stderr.lower():
+            error_lower = stderr.lower()
+            if "authentication" in error_lower or "unauthorized" in error_lower or "please log in" in error_lower:
                 error_msg = "❌ Claude authentication error. Please check Claude CLI credentials."
-            elif "rate limit" in stderr.lower():
+                logger.error("DIAGNOSIS: Claude CLI needs re-authentication")
+            elif "rate limit" in error_lower or "too many requests" in error_lower:
                 error_msg = "❌ Claude rate limit reached. Will retry later."
-            elif "timeout" in stderr.lower():
+                logger.error("DIAGNOSIS: Claude API rate limit hit")
+            elif "timeout" in error_lower or "timed out" in error_lower:
                 error_msg = "❌ Claude request timed out. The issue might be too complex."
+                logger.error("DIAGNOSIS: Claude request timeout")
+            elif "no such file or directory" in error_lower:
+                error_msg = "❌ Claude CLI not found. Please check installation."
+                logger.error("DIAGNOSIS: Claude CLI binary not found in PATH")
+            elif "permission denied" in error_lower:
+                error_msg = "❌ Permission denied running Claude CLI."
+                logger.error("DIAGNOSIS: Claude CLI permission issue")
+            elif stderr.strip() == "" and stdout.strip() == "":
+                error_msg = "❌ Claude CLI returned no output. It may need re-authentication or there's a session issue."
+                logger.error("DIAGNOSIS: Claude CLI silent failure - likely auth issue")
             else:
-                error_msg = "❌ Claude Code encountered an error while attempting to fix this issue. Manual intervention may be required."
+                error_msg = f"❌ Claude Code encountered an error. Check logs for details. Error preview: {stderr[:200]}"
+                logger.error("DIAGNOSIS: Unknown Claude error - check debug file")
             
             post_issue_comment(repo_path, issue_number, error_msg)
             return False

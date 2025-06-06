@@ -264,6 +264,23 @@ def commit_and_push_fix(repo_path, issue_number):
     return True
 
 
+def post_issue_comment(repo_path, issue_number, comment):
+    """Post a comment to a GitHub issue"""
+    # Escape quotes in the comment
+    escaped_comment = comment.replace('"', '\\"')
+    success, _, stderr = run_command(
+        f'gh issue comment {issue_number} --body "{escaped_comment}"',
+        cwd=repo_path
+    )
+    
+    if success:
+        logger.info(f"Posted comment to issue #{issue_number}")
+    else:
+        logger.error(f"Failed to post comment: {stderr}")
+    
+    return success
+
+
 def mark_issue_resolved(repo_path, issue_number):
     """Mark an issue as resolved"""
     success, _, stderr = run_command(
@@ -286,9 +303,15 @@ def process_issue(repo_path, issue):
     
     logger.info(f"Processing issue #{issue_number}: {issue_title}")
     
+    # Post initial "working on it" comment
+    post_issue_comment(repo_path, issue_number, 
+        "🤖 CronCoder is now working on this issue. I'll analyze the problem and implement a fix using Claude Code.")
+    
     # Refresh repository to latest state
     if not refresh_repository(repo_path):
         logger.error("Failed to refresh repository")
+        post_issue_comment(repo_path, issue_number, 
+            "❌ Failed to refresh repository to latest state. Please check repository access.")
         return False
     
     # Convert path for Windows if needed
@@ -299,6 +322,8 @@ def process_issue(repo_path, issue):
     
     # Run Claude Code in the repository directory
     logger.info(f"Running Claude Code to fix issue #{issue_number}...")
+    post_issue_comment(repo_path, issue_number, 
+        "🔍 Analyzing the issue and generating a fix with Claude Code...")
     
     # Use full path to claude executable with non-interactive mode
     claude_path = "/home/human/.claude/local/claude"
@@ -317,17 +342,29 @@ def process_issue(repo_path, issue):
     
     if not success:
         logger.error(f"Claude Code failed to fix issue: {stderr}")
+        post_issue_comment(repo_path, issue_number, 
+            "❌ Claude Code encountered an error while attempting to fix this issue. Manual intervention may be required.")
         return False
     
     # Run tests to verify the fix
+    post_issue_comment(repo_path, issue_number, 
+        "🧪 Running tests to verify the fix...")
+    
     if not run_tests(repo_path):
         logger.warning("Tests failed after fix, reverting changes")
         run_command("git checkout .", cwd=repo_path)
+        post_issue_comment(repo_path, issue_number, 
+            "⚠️ Tests failed after applying the fix. Reverting changes. This issue may require manual review.")
         return False
     
     # Commit and push the fix
+    post_issue_comment(repo_path, issue_number, 
+        "✅ Tests passed! Committing and pushing the fix...")
+    
     if not commit_and_push_fix(repo_path, issue_number):
         print("Failed to commit and push fix")
+        post_issue_comment(repo_path, issue_number, 
+            "❌ Failed to commit and push the fix. Please check repository permissions.")
         return False
     
     # Mark issue as resolved

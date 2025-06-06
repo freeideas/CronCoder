@@ -551,6 +551,10 @@ def process_issue(repo_path, issue):
             "❌ Failed to commit and push the fix. Please check repository permissions.")
         return False
     
+    # Post final success message before closing
+    post_issue_comment(repo_path, issue_number, 
+        "🎉 Successfully fixed and pushed the solution! The fix has been tested and committed. Closing this issue.")
+    
     # Mark issue as resolved
     mark_issue_resolved(repo_path, issue_number)
     

@@ -14,7 +14,8 @@ import json
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+import re
 
 
 def setup_logging():
@@ -154,6 +155,71 @@ def get_open_issues(repo_path):
     except json.JSONDecodeError:
         logger.error(f"Failed to parse issues JSON: {stdout}")
         return []
+
+
+def get_issue_comments(repo_path, issue_number):
+    """Get all comments for a specific issue"""
+    success, stdout, stderr = run_command(
+        f"gh issue view {issue_number} --json comments --jq '.comments'", 
+        cwd=repo_path
+    )
+    
+    if not success:
+        logger.error(f"Failed to get issue comments: {stderr}")
+        return []
+    
+    try:
+        comments = json.loads(stdout)
+        return comments
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse comments JSON: {stdout}")
+        return []
+
+
+def get_issue_details(repo_path, issue_number):
+    """Get full details of an issue including body"""
+    success, stdout, stderr = run_command(
+        f"gh issue view {issue_number} --json number,title,body", 
+        cwd=repo_path
+    )
+    
+    if not success:
+        logger.error(f"Failed to get issue details: {stderr}")
+        return None
+    
+    try:
+        issue = json.loads(stdout)
+        return issue
+    except json.JSONDecodeError:
+        logger.error(f"Failed to parse issue JSON: {stdout}")
+        return None
+
+
+def check_recent_attempt(repo_path, issue_number, cooldown_hours=1):
+    """Check if CronCoder has attempted this issue recently"""
+    comments = get_issue_comments(repo_path, issue_number)
+    
+    # Look for CronCoder's "working on it" comment
+    croncoder_pattern = r"🤖 CronCoder is now working on this issue"
+    
+    for comment in reversed(comments):  # Check most recent first
+        if croncoder_pattern in comment.get('body', ''):
+            # Parse the timestamp
+            created_at = comment.get('createdAt', '')
+            if created_at:
+                try:
+                    # GitHub timestamps are in ISO format with Z suffix
+                    comment_time = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    current_time = datetime.now(timezone.utc)
+                    time_diff = current_time - comment_time
+                    
+                    if time_diff.total_seconds() < (cooldown_hours * 3600):
+                        logger.info(f"Issue #{issue_number} was attempted {time_diff.total_seconds()/60:.1f} minutes ago, skipping")
+                        return True
+                except Exception as e:
+                    logger.error(f"Error parsing timestamp: {e}")
+    
+    return False
 
 
 def is_git_repository(path):
@@ -303,6 +369,18 @@ def process_issue(repo_path, issue):
     
     logger.info(f"Processing issue #{issue_number}: {issue_title}")
     
+    # Check if we've attempted this issue recently
+    if check_recent_attempt(repo_path, issue_number):
+        logger.info(f"Issue #{issue_number} was attempted recently, skipping for now")
+        return False
+    
+    # Get full issue details including body
+    issue_details = get_issue_details(repo_path, issue_number)
+    if issue_details:
+        issue_body = issue_details.get('body', '')
+    else:
+        issue_body = ''
+    
     # Post initial "working on it" comment
     post_issue_comment(repo_path, issue_number, 
         "🤖 CronCoder is now working on this issue. I'll analyze the problem and implement a fix using Claude Code.")
@@ -318,19 +396,18 @@ def process_issue(repo_path, issue):
     windows_path = convert_wsl_to_windows_path(repo_path)
     
     # Use Claude Code to fix the issue
-    claude_prompt = f"Please fix GitHub issue #{issue_number}: {issue_title}. Run any necessary tests to verify your fix."
+    claude_prompt = f"Please fix GitHub issue #{issue_number}: {issue_title}"
+    if issue_body:
+        claude_prompt += f"\n\nIssue description:\n{issue_body}"
+    claude_prompt += "\n\nRun any necessary tests to verify your fix."
     
     # Run Claude Code in the repository directory
     logger.info(f"Running Claude Code to fix issue #{issue_number}...")
     post_issue_comment(repo_path, issue_number, 
         "🔍 Analyzing the issue and generating a fix with Claude Code...")
     
-    # Use full path to claude executable with non-interactive mode
-    claude_path = "/home/human/.claude/local/claude"
-    if os.path.exists(claude_path):
-        claude_cmd = f'{claude_path} --dangerously-skip-permissions -p "{claude_prompt}"'
-    else:
-        claude_cmd = f'claude --dangerously-skip-permissions -p "{claude_prompt}"'
+    # Use claude executable
+    claude_cmd = f'claude -p "{claude_prompt}"'
     
     # Change to repo directory and run Claude
     original_cwd = os.getcwd()
@@ -403,9 +480,14 @@ def scan_repositories(repos_dir, failed_issues=None):
         for issue in issues:
             issue_key = f"{item}#{issue['number']}"
             
-            # Skip if we've already failed this issue
+            # Skip if we've already failed this issue in this session
             if issue_key in failed_issues:
-                logger.info(f"Skipping previously failed issue #{issue['number']}")
+                logger.info(f"Skipping previously failed issue #{issue['number']} in this session")
+                continue
+            
+            # Check if we've attempted this issue recently (even in previous sessions)
+            if check_recent_attempt(repo_path, issue['number']):
+                logger.info(f"Issue #{issue['number']} was attempted recently, skipping")
                 continue
             
             try:
@@ -464,7 +546,7 @@ def main():
                 break  # Exit after sleep
             
             # Check if all issues have failed
-            if failed_issues and not any(issue for issue in issues_found):
+            if failed_issues and not issues_found:
                 logger.info(f"All remaining issues have failed. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
                 break

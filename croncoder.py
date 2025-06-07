@@ -155,20 +155,58 @@ Then:
 
 Please handle the complete workflow from start to finish."""
     
-    cmd = f'claude code "{repo_path}" "{prompt}"'
-    result = run_command(cmd, cwd=repo_path, timeout=3600, check=False)
+    claude_logs_dir = os.path.join(repo_path, 'claude-logs')
+    os.makedirs(claude_logs_dir, exist_ok=True)
     
-    if result.returncode != 0:
-        error_msg = result.stderr[:1000] if result.stderr else "Unknown error"
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    log_file = os.path.join(claude_logs_dir, f'claude-{timestamp}-issue-{issue_number}.log')
+    
+    cmd = ['claude', 'code', repo_path, prompt]
+    start_time = datetime.now()
+    
+    with open(log_file, 'w') as f:
+        f.write(f"=== Claude Code Session Log ===\n")
+        f.write(f"Start Time: {start_time}\n")
+        f.write(f"Issue: #{issue_number} - {issue_title}\n")
+        f.write(f"Repository: {repo_path}\n")
+        f.write(f"\n=== PROMPT ===\n{prompt}\n\n=== OUTPUT ===\n")
+        f.flush()
+        
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, 
+                                   text=True, bufsize=1, cwd=repo_path)
+        
+        output = []
+        for line in process.stdout:
+            f.write(line)
+            f.flush()
+            output.append(line)
+            logger.info(f"Claude: {line.rstrip()}")
+        
+        try:
+            process.wait(timeout=3600)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        
+        end_time = datetime.now()
+        f.write(f"\n\n=== SESSION END ===\n")
+        f.write(f"End Time: {end_time}\n")
+        f.write(f"Duration: {end_time - start_time}\n")
+        f.write(f"Exit Code: {process.returncode}\n")
+    
+    output_text = ''.join(output)
+    
+    if process.returncode != 0:
+        error_msg = output_text[:1000] if output_text else "Unknown error"
         if "unauthorized" in error_msg.lower() or "authentication" in error_msg.lower():
             return False, "Check Claude CLI credentials"
         elif "rate limit" in error_msg.lower():
             return False, "Claude rate limit reached"
-        elif result.returncode == -9 or "timeout" in error_msg.lower():
+        elif process.returncode == -9 or "timeout" in error_msg.lower():
             return False, "Issue might be too complex (60-minute timeout reached)"
         return False, f"Claude Code failed: {error_msg}"
     
-    return True, result.stdout
+    return True, output_text
 
 
 def process_issue(repo_path, issue):
@@ -180,6 +218,15 @@ def process_issue(repo_path, issue):
     if issue_number in failed_issues:
         logger.info(f"Skipping previously failed issue #{issue_number}")
         return False
+    
+    # Post comment on issue before starting work
+    comment_result = run_command(
+        f'gh issue comment {issue_number} --body "🤖 CronCoder is now working on this issue."',
+        cwd=repo_path,
+        check=False
+    )
+    if comment_result.returncode != 0:
+        logger.warning(f"Failed to post comment on issue #{issue_number}: {comment_result.stderr}")
     
     logger.info(f"Running Claude Code to handle issue #{issue_number}...")
     success, output = run_claude_code(repo_path, issue_number, issue_title)

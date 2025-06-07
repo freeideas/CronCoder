@@ -124,19 +124,34 @@ def check_github_rate_limit():
         )
         
         if result.returncode != 0:
+            # If we can't check rate limits, assume we're rate limited
+            if "rate limit" in result.stderr.lower():
+                logger.error("Hit rate limit while checking rate limits!")
+                return 3600  # Wait 1 hour
             logger.warning(f"Failed to check rate limits: {result.stderr}")
             return 0
         
         data = json.loads(result.stdout)
-        core = data['resources']['core']
         
-        remaining = core['remaining']
-        reset_timestamp = core['reset']
+        # Check both core and GraphQL limits
+        core = data['resources']['core']
+        graphql = data['resources'].get('graphql', core)  # Fallback to core if no graphql
+        
+        # Use the more restrictive limit
+        core_remaining = core['remaining']
+        graphql_remaining = graphql['remaining']
+        remaining = min(core_remaining, graphql_remaining)
+        
+        # Use the earliest reset time
+        core_reset = core['reset']
+        graphql_reset = graphql.get('reset', core_reset)
+        reset_timestamp = min(core_reset, graphql_reset)
+        
         reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
         current_time = datetime.now(timezone.utc)
         time_until_reset = max(0, (reset_time - current_time).total_seconds())
         
-        logger.info(f"GitHub API rate limit: {remaining}/{core['limit']} (resets in {time_until_reset/60:.1f} min)")
+        logger.info(f"GitHub API rate limit - Core: {core_remaining}/{core['limit']}, GraphQL: {graphql_remaining}/{graphql.get('limit', 'N/A')} (resets in {time_until_reset/60:.1f} min)")
         
         # If we're low on quota, calculate wait time
         if remaining < 50:
@@ -149,7 +164,7 @@ def check_github_rate_limit():
                 # Calculate wait time to spread remaining requests
                 wait_time = time_until_reset / remaining
                 if wait_time > 10:  # Only wait if it's more than 10 seconds
-                    logger.warning(f"Low GitHub API quota. Adding {wait_time:.1f}s delay between requests")
+                    logger.warning(f"Low GitHub API quota ({remaining} left). Adding {wait_time:.1f}s delay between requests")
                     return wait_time
         
         return 0
@@ -227,11 +242,10 @@ def get_open_issues(repo_path):
     success, stdout, stderr = run_command("gh issue list --state open --json number,title,labels", cwd=repo_path)
     
     if not success:
-        if "rate limit" in stderr.lower():
+        if "rate limit" in stderr.lower() or "api rate limit exceeded" in stderr.lower():
             logger.error("GitHub API rate limit hit while fetching issues")
-            # Force a longer wait
-            time.sleep(300)  # 5 minutes
-            return []
+            # Return None to indicate rate limit error
+            return None
         logger.error(f"Failed to get issues: {stderr}")
         return []
     
@@ -597,8 +611,12 @@ def process_issue(repo_path, issue):
 def scan_repositories(repos_dir, failed_issues=None):
     """Scan all repositories and process their issues"""
     issues_found = False
+    rate_limit_hit = False
     if failed_issues is None:
         failed_issues = set()
+    
+    # Track if we found any processable issues (not failed)
+    processable_issues_found = False
     
     # Iterate through all subdirectories
     for item in os.listdir(repos_dir):
@@ -612,6 +630,11 @@ def scan_repositories(repos_dir, failed_issues=None):
         
         # Get open issues
         issues = get_open_issues(repo_path)
+        
+        # Check if we hit rate limit
+        if issues is None:
+            rate_limit_hit = True
+            continue
         
         if not issues:
             logger.info(f"No open issues found in {item}")
@@ -634,6 +657,9 @@ def scan_repositories(repos_dir, failed_issues=None):
                 logger.info(f"Issue #{issue['number']} was attempted recently, skipping")
                 continue
             
+            # We found at least one issue we can process
+            processable_issues_found = True
+            
             try:
                 success = process_issue(repo_path, issue)
                 if not success:
@@ -647,7 +673,7 @@ def scan_repositories(repos_dir, failed_issues=None):
                 failed_issues.add(issue_key)
                 continue
     
-    return issues_found, failed_issues
+    return issues_found, failed_issues, processable_issues_found, rate_limit_hit
 
 
 def main():
@@ -691,18 +717,25 @@ def main():
         
         # Main loop
         while True:
-            issues_found, failed_issues = scan_repositories(repos_dir, failed_issues)
+            issues_found, failed_issues, processable_issues_found, rate_limit_hit = scan_repositories(repos_dir, failed_issues)
             
+            # If we hit GitHub rate limit, wait longer
+            if rate_limit_hit:
+                logger.warning(f"GitHub API rate limit hit. Sleeping for {sleep_time} minutes...")
+                time.sleep(sleep_time * 60)
+                break  # Exit after sleep
+            
+            # If no issues found at all
             if not issues_found:
                 logger.info(f"No open issues found. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
                 break  # Exit after sleep
             
-            # Check if all issues have failed
-            if failed_issues and not issues_found:
-                logger.info(f"All remaining issues have failed. Sleeping for {sleep_time} minutes...")
+            # If we found issues but none are processable (all failed or recently attempted)
+            if issues_found and not processable_issues_found:
+                logger.info(f"All issues are either failed or recently attempted. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
-                break
+                break  # Exit to avoid infinite loop
             
             # If issues were found and processed, loop again immediately
             logger.info("Issues were processed, checking for more...")

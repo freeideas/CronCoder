@@ -1,0 +1,5 @@
+{
+  "sleep_time": 5,
+  "repos_directory": "/home/ace/prjx",
+  "_comment": "sleep_time is in minutes; repos_directory should contain GitHub repositories"
+}

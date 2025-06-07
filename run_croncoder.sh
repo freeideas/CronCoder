@@ -17,10 +17,7 @@ fi
 # Change to the script directory
 cd /home/ace/prjx/croncoder
 
-# Activate virtual environment if it exists
-if [ -d ".venv" ]; then
-    source .venv/bin/activate
-fi
+# No virtual environment needed - using only Python standard library
 
 # Log startup
 echo "$(date): CronCoder starting from cron" >> logs/cron.log

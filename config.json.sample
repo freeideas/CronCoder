@@ -1,0 +1,5 @@
+{
+  "sleep_time": 30,
+  "repos_directory": "/path/to/repos",
+  "_comment": "sleep_time is in minutes; repos_directory should contain GitHub repositories"
+}

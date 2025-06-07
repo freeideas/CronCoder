@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 CronCoder is an automated GitHub issue resolver that monitors repositories for open issues and uses Claude Code to implement fixes. The main components are:
 
 - `croncoder.py` - Main script that orchestrates the issue resolution process
-- `config.yaml` - Configuration file specifying sleep time and repositories directory
+- `config.json` - Configuration file specifying sleep time and repositories directory
 
 ## Key Commands
 
@@ -17,8 +17,7 @@ Since the implementation files don't exist yet, here are the expected commands b
 # Run the main script
 python croncoder.py
 
-# Install dependencies
-pip install pyyaml
+# No dependencies to install - uses only Python standard library
 ```
 
 ## Architecture
@@ -35,6 +34,18 @@ The system follows this workflow:
    - Marks issues as resolved
 4. **Loop Control**: Continues processing until no issues remain, then sleeps
 
+## Code Style Guidelines
+
+**IMPORTANT**: This project follows the coding philosophy outlined in `CODE_GUIDELINES.md`. Key principles:
+
+- **Brevity above all**: Fewer lines of code is always better
+- **Early returns**: Use early returns and breaks to flatten code structure
+- **Minimal exception handling**: Let exceptions bubble up naturally
+- **No unnecessary comments**: Code should be self-explanatory
+- **3 blank lines between functions**: As specified in the formatting guidelines
+
+Please read `CODE_GUIDELINES.md` before making any changes to ensure consistency.
+
 ## Implementation Notes
 
 When implementing `croncoder.py`, ensure:
@@ -44,11 +55,10 @@ When implementing `croncoder.py`, ensure:
 - Safe execution of Claude Code commands
 - Test discovery should be flexible to handle different test frameworks
 - Commit messages should reference the issue being fixed
-- WSL2 path conversion: Automatically convert `/mnt/c/` paths to `C:\` when running Windows commands (e.g., when invoking Claude Code on Windows)
 
 ## Dependencies
 
-- Python 3.x with PyYAML
+- Python 3.9+ (no external dependencies)
 - `gh` CLI (GitHub CLI) - must be authenticated
 - Claude Code CLI - must be authenticated
 - Git with push permissions to target repositories

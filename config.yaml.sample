@@ -1,2 +1,0 @@
-sleep_time: 30  # Minutes to sleep when no issues found
-repos_directory: /path/to/repos  # Directory containing GitHub repositories

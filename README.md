@@ -21,32 +21,36 @@ The script ensures only one instance runs at a time using a PID-based lock file 
 - **Test Verification**: Automatically discovers and runs project tests before committing
 - **Continuous Processing**: Loops until no open issues remain, then sleeps
 - **Comprehensive Logging**: Logs all activities to both console and rotating log files
+- **GitHub Rate Limit Handling**: Monitors API rate limits and intelligently waits when necessary
+- **Enhanced Error Diagnostics**: Provides detailed error messages for Claude CLI failures
+- **Skip Functionality**: Can skip issues labeled with 'croncoder-skip'
 
 ## Prerequisites
 
-- Python 3.x
+- Python 3.9+
 - `gh` CLI tool (authenticated with appropriate permissions)
 - Claude Code CLI (authenticated and configured)
 - Git configured with push permissions
-- PyYAML package (`pip install pyyaml`)
 
 ## Configuration
 
-Create a `config.yaml` file in the same directory as the script:
+Create a `config.json` file in the same directory as the script:
 
-```yaml
-sleep_time: 30  # Minutes to sleep when no issues found
-repos_directory: /path/to/repos  # Directory containing GitHub repositories
+```json
+{
+  "sleep_time": 30,
+  "repos_directory": "/path/to/repos",
+  "_comment": "sleep_time is in minutes; repos_directory should contain GitHub repositories"
+}
 ```
 
-**Note for WSL2/Windows users**: The script automatically converts WSL2 paths to Windows paths when needed. For example, `/mnt/c/repos` will be converted to `C:\repos` when running Windows commands.
 
 ## Directory Structure
 
 ```
 .
 ├── croncoder.py      # Main script
-├── config.yaml       # Configuration file
+├── config.json       # Configuration file
 ├── logs/             # Log files (created automatically)
 │   └── croncoder.log # Main log file (rotates at 10MB)
 └── README.md         # This file
@@ -70,12 +74,47 @@ Run the script directly:
 python croncoder.py
 ```
 
-Or set up as a cron job to run periodically:
+Or run via the shell script (recommended):
 
 ```bash
-# Run every hour
-0 * * * * /usr/bin/python /path/to/croncoder.py
+./run_croncoder.sh
 ```
+
+Set up as a cron job to run periodically:
+
+```bash
+# Run every 30 minutes
+*/30 * * * * /path/to/run_croncoder.sh
+```
+
+**Note**: Use the shell script (`run_croncoder.sh`) in cron jobs as it properly sets up the environment before running the Python script.
+
+### Claude CLI Cron Compatibility
+
+The Claude CLI requires specific environment variables when running from cron:
+
+1. **Required Environment Variables**:
+   - `HOME=/home/ace` - For config files
+   - `USER=ace` - For user context
+   - `XDG_CONFIG_HOME=$HOME/.config` - For Claude config
+   - `PATH` must include `/home/ace/.npm-global/bin`
+
+2. **Implementation in `run_croncoder.sh`**:
+   - Sets all required environment variables
+   - Logs startup/completion to `logs/cron.log`
+   - Preserves exit codes for debugging
+
+### Testing Your Setup
+
+Run the diagnostic script to verify your setup:
+```bash
+python3 test_claude_cron.py
+```
+
+This will test:
+- Claude CLI in cron-like environment
+- GitHub API rate limits
+- Recent error patterns in logs
 
 ## How It Works
 
@@ -88,6 +127,29 @@ Or set up as a cron job to run periodically:
    - If tests pass, commits and pushes the fix
    - Marks the issue as resolved
 4. **Loop or Sleep**: If issues were found, loops back to check for more. Otherwise, sleeps for configured duration and exits
+
+### GitHub Rate Limit Handling
+
+CronCoder includes intelligent rate limit management:
+
+1. **Rate Limit Checking**:
+   - Checks rate limits before API calls
+   - Calculates wait times when quota is low
+   - Implements exponential backoff
+   - Logs rate limit status
+
+2. **Smart Waiting**:
+   - If rate limit exhausted: waits until reset + 1 minute
+   - If < 50 requests remaining: spreads requests evenly
+   - Adds 30-second delay between issues
+
+3. **Error Detection**:
+   - Detects rate limit errors in API responses
+   - Forces 5-minute wait on rate limit errors
+
+### Issue Skip Functionality
+
+To skip an issue from CronCoder processing, add the label 'croncoder-skip' on GitHub.
 
 ## Security Considerations
 
@@ -118,6 +180,27 @@ Example log entries:
 ## Error Handling
 
 The script includes cleanup mechanisms to remove lock files even if errors occur, preventing deadlocks in subsequent runs.
+
+### Enhanced Error Diagnostics
+
+CronCoder provides detailed error diagnostics for Claude CLI failures:
+
+1. **Claude Error Categories**:
+   - Authentication errors → "Check Claude CLI credentials"
+   - Rate limit errors → "Claude rate limit reached"
+   - Timeout errors → "Issue might be too complex"
+   - Other errors → Shows first 1000 chars of stderr
+
+2. **Improved Error Handling**:
+   - Captures Claude stdout/stderr for debugging
+   - 30-minute timeout for complex issues
+   - Specific error messages for each failure type
+   - Logs detailed errors to help diagnose issues
+
+3. **Additional Features**:
+   - Skip issues with 'croncoder-skip' label
+   - Test command timeout (10 minutes)
+   - Better process management with timeouts
 
 ## License
 

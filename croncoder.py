@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-import os, sys, time, subprocess, json, logging
-from datetime import datetime, timezone
+import os, sys, time, subprocess, json, logging, glob
+from datetime import datetime, timezone, timedelta
 
-logger = logging.getLogger('croncoder')
+logger = None
 lock_file = '/tmp/croncoder.lock'
 failed_issues = set()
 
@@ -13,10 +13,50 @@ def run_command(cmd, cwd=None, timeout=None, check=True):
     return result
 
 
+class DateRotatingLogger:
+    def __init__(self, log_dir='logs', prefix='', days_to_keep=7):
+        self.log_dir = log_dir
+        self.prefix = prefix
+        self.days_to_keep = days_to_keep
+        os.makedirs(log_dir, exist_ok=True)
+        self._cleanup_old_logs()
+    
+    
+    def _cleanup_old_logs(self):
+        cutoff = datetime.now() - timedelta(days=self.days_to_keep)
+        pattern = os.path.join(self.log_dir, f"{self.prefix}*.log")
+        for file in glob.glob(pattern):
+            try:
+                date_str = os.path.basename(file).replace(self.prefix, '').replace('.log', '')
+                file_date = datetime.strptime(date_str, '%Y-%m-%d')
+                if file_date < cutoff: os.remove(file)
+            except: pass
+    
+    
+    def get_logger(self, name):
+        today = datetime.now().strftime('%Y-%m-%d')
+        log_file = os.path.join(self.log_dir, f"{self.prefix}{today}.log")
+        
+        logger = logging.getLogger(name)
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        
+        formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+        
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
+        
+        return logger
+
+
 def setup_logging():
-    os.makedirs('logs', exist_ok=True)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s',
-                       handlers=[logging.StreamHandler(), logging.FileHandler('logs/croncoder.log')])
+    rotator = DateRotatingLogger(prefix='croncoder-')
+    return rotator.get_logger('croncoder')
 
 
 def acquire_lock():
@@ -116,7 +156,7 @@ Then:
 Please handle the complete workflow from start to finish."""
     
     cmd = f'claude code "{repo_path}" "{prompt}"'
-    result = run_command(cmd, cwd=repo_path, timeout=1800, check=False)
+    result = run_command(cmd, cwd=repo_path, timeout=3600, check=False)
     
     if result.returncode != 0:
         error_msg = result.stderr[:1000] if result.stderr else "Unknown error"
@@ -125,7 +165,7 @@ Please handle the complete workflow from start to finish."""
         elif "rate limit" in error_msg.lower():
             return False, "Claude rate limit reached"
         elif result.returncode == -9 or "timeout" in error_msg.lower():
-            return False, "Issue might be too complex (30-minute timeout reached)"
+            return False, "Issue might be too complex (60-minute timeout reached)"
         return False, f"Claude Code failed: {error_msg}"
     
     return True, result.stdout
@@ -154,7 +194,8 @@ def process_issue(repo_path, issue):
 
 
 def main():
-    setup_logging()
+    global logger
+    logger = setup_logging()
     
     result = run_command("claude --version", check=False)
     if result.returncode == 0:

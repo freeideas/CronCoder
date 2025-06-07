@@ -161,7 +161,7 @@ Please handle the complete workflow from start to finish."""
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     log_file = os.path.join(claude_logs_dir, f'claude-{timestamp}-issue-{issue_number}.log')
     
-    cmd = f'echo {repr(prompt)} | claude code --dangerously-skip-permissions'
+    cmd = f'echo {repr(prompt)} | claude code -p --dangerously-skip-permissions'
     start_time = datetime.now()
     
     with open(log_file, 'w') as f:

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-CronCoder - Automated GitHub issue resolver using Claude Code
+Enhanced CronCoder - Automated GitHub issue resolver using Claude Code
+with improved error handling and rate limit awareness
 """
 
 import os
@@ -112,6 +113,92 @@ class LockFile:
         sys.exit(0)
 
 
+def check_github_rate_limit():
+    """Check GitHub API rate limits and return wait time if needed"""
+    try:
+        result = subprocess.run(
+            ['gh', 'api', 'rate_limit'],
+            capture_output=True,
+            text=True,
+            check=False
+        )
+        
+        if result.returncode != 0:
+            # If we can't check rate limits, assume we're rate limited
+            if "rate limit" in result.stderr.lower():
+                logger.error("Hit rate limit while checking rate limits!")
+                return 3600  # Wait 1 hour
+            logger.warning(f"Failed to check rate limits: {result.stderr}")
+            return 0
+        
+        data = json.loads(result.stdout)
+        
+        # Check both core and GraphQL limits
+        core = data['resources']['core']
+        graphql = data['resources'].get('graphql', core)  # Fallback to core if no graphql
+        
+        # Use the more restrictive limit
+        core_remaining = core['remaining']
+        graphql_remaining = graphql['remaining']
+        remaining = min(core_remaining, graphql_remaining)
+        
+        # Use the earliest reset time
+        core_reset = core['reset']
+        graphql_reset = graphql.get('reset', core_reset)
+        reset_timestamp = min(core_reset, graphql_reset)
+        
+        reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+        current_time = datetime.now(timezone.utc)
+        time_until_reset = max(0, (reset_time - current_time).total_seconds())
+        
+        logger.info(f"GitHub API rate limit - Core: {core_remaining}/{core['limit']}, GraphQL: {graphql_remaining}/{graphql.get('limit', 'N/A')} (resets in {time_until_reset/60:.1f} min)")
+        
+        # If we're low on quota, calculate wait time
+        if remaining < 50:
+            if remaining == 0:
+                # No quota left, must wait until reset
+                wait_time = time_until_reset + 60  # Add 1 minute buffer
+                logger.warning(f"GitHub API rate limit exhausted! Waiting {wait_time/60:.1f} minutes until reset")
+                return wait_time
+            else:
+                # Calculate wait time to spread remaining requests
+                wait_time = time_until_reset / remaining
+                if wait_time > 10:  # Only wait if it's more than 10 seconds
+                    logger.warning(f"Low GitHub API quota ({remaining} left). Adding {wait_time:.1f}s delay between requests")
+                    return wait_time
+        
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error checking rate limit: {e}")
+        return 0
+
+
+def setup_claude_environment():
+    """Ensure Claude CLI has proper environment variables"""
+    # Add Claude CLI to PATH if not present
+    claude_path = "/home/ace/.npm-global/bin"
+    if claude_path not in os.environ.get('PATH', ''):
+        os.environ['PATH'] = f"{claude_path}:{os.environ.get('PATH', '')}"
+    
+    # Ensure config directory is set
+    if 'XDG_CONFIG_HOME' not in os.environ:
+        os.environ['XDG_CONFIG_HOME'] = os.path.expanduser('~/.config')
+    
+    # Test Claude CLI
+    try:
+        result = subprocess.run(['claude', '--version'], capture_output=True, text=True)
+        if result.returncode == 0:
+            logger.info(f"Claude CLI ready: {result.stdout.strip()}")
+            return True
+        else:
+            logger.error(f"Claude CLI test failed: {result.stderr}")
+            return False
+    except FileNotFoundError:
+        logger.error("Claude CLI not found in PATH")
+        return False
+
+
 def convert_wsl_to_windows_path(path):
     """Convert WSL2 path to Windows path if needed"""
     path_str = str(path)
@@ -125,8 +212,8 @@ def convert_wsl_to_windows_path(path):
     return path_str
 
 
-def run_command(cmd, cwd=None, capture_output=True):
-    """Run a shell command and return the result"""
+def run_command(cmd, cwd=None, capture_output=True, timeout=300):
+    """Run a shell command and return the result with timeout"""
     try:
         result = subprocess.run(
             cmd,
@@ -134,24 +221,45 @@ def run_command(cmd, cwd=None, capture_output=True):
             cwd=cwd,
             capture_output=capture_output,
             text=True,
-            check=False
+            check=False,
+            timeout=timeout
         )
         return result.returncode == 0, result.stdout, result.stderr
+    except subprocess.TimeoutExpired:
+        logger.error(f"Command timed out after {timeout} seconds: {cmd}")
+        return False, "", "Command timed out"
     except Exception as e:
         return False, "", str(e)
 
 
 def get_open_issues(repo_path):
     """Get list of open issues for a repository"""
-    success, stdout, stderr = run_command("gh issue list --state open --json number,title", cwd=repo_path)
+    # Check rate limit before API call
+    wait_time = check_github_rate_limit()
+    if wait_time > 0:
+        time.sleep(wait_time)
+    
+    success, stdout, stderr = run_command("gh issue list --state open --json number,title,labels", cwd=repo_path)
     
     if not success:
+        if "rate limit" in stderr.lower() or "api rate limit exceeded" in stderr.lower():
+            logger.error("GitHub API rate limit hit while fetching issues")
+            # Return None to indicate rate limit error
+            return None
         logger.error(f"Failed to get issues: {stderr}")
         return []
     
     try:
         issues = json.loads(stdout)
-        return issues
+        # Filter out issues with 'croncoder-skip' label
+        filtered_issues = []
+        for issue in issues:
+            labels = [label.get('name', '') for label in issue.get('labels', [])]
+            if 'croncoder-skip' not in labels:
+                filtered_issues.append(issue)
+            else:
+                logger.info(f"Skipping issue #{issue['number']} due to 'croncoder-skip' label")
+        return filtered_issues
     except json.JSONDecodeError:
         logger.error(f"Failed to parse issues JSON: {stdout}")
         return []
@@ -295,7 +403,7 @@ def run_tests(repo_path):
         return True
     
     logger.info(f"Running tests with: {test_command}")
-    success, stdout, stderr = run_command(test_command, cwd=repo_path)
+    success, stdout, stderr = run_command(test_command, cwd=repo_path, timeout=600)  # 10 minute timeout
     
     if success:
         logger.info("Tests passed!")
@@ -406,22 +514,68 @@ def process_issue(repo_path, issue):
     post_issue_comment(repo_path, issue_number, 
         "🔍 Analyzing the issue and generating a fix with Claude Code...")
     
-    # Use claude executable
+    # Use claude executable with proper error capture
     claude_cmd = f'claude -p "{claude_prompt}"'
     
     # Change to repo directory and run Claude
     original_cwd = os.getcwd()
     try:
         os.chdir(repo_path)
-        success, stdout, stderr = run_command(claude_cmd, capture_output=False)
+        # Capture output to help diagnose "manual intervention" errors
+        success, stdout, stderr = run_command(claude_cmd, capture_output=True, timeout=1800)  # 30 minute timeout
+        
+        if not success:
+            logger.error(f"Claude Code failed to fix issue #{issue_number}")
+            logger.error(f"Claude command: {claude_cmd[:100]}...")
+            logger.error(f"Exit code: {success}")
+            logger.error(f"Claude stdout length: {len(stdout)} chars")
+            logger.error(f"Claude stderr: {stderr[:2000]}")  # Log first 2000 chars of error
+            
+            # Save full output for debugging
+            debug_file = os.path.join(os.path.dirname(__file__), 'logs', f'claude_error_{issue_number}_{datetime.now().strftime("%Y%m%d_%H%M%S")}.txt')
+            try:
+                with open(debug_file, 'w') as f:
+                    f.write(f"Issue: #{issue_number}\n")
+                    f.write(f"Command: {claude_cmd}\n")
+                    f.write(f"Working Directory: {repo_path}\n")
+                    f.write(f"Exit Code: {success}\n")
+                    f.write(f"\n--- STDOUT ({len(stdout)} chars) ---\n")
+                    f.write(stdout)
+                    f.write(f"\n--- STDERR ({len(stderr)} chars) ---\n")
+                    f.write(stderr)
+                logger.info(f"Full Claude output saved to: {debug_file}")
+            except Exception as e:
+                logger.error(f"Failed to save debug output: {e}")
+            
+            # Check for specific error patterns
+            error_lower = stderr.lower()
+            if "authentication" in error_lower or "unauthorized" in error_lower or "please log in" in error_lower:
+                error_msg = "❌ Claude authentication error. Please check Claude CLI credentials."
+                logger.error("DIAGNOSIS: Claude CLI needs re-authentication")
+            elif "rate limit" in error_lower or "too many requests" in error_lower:
+                error_msg = "❌ Claude rate limit reached. Will retry later."
+                logger.error("DIAGNOSIS: Claude API rate limit hit")
+            elif "timeout" in error_lower or "timed out" in error_lower:
+                error_msg = "❌ Claude request timed out. The issue might be too complex."
+                logger.error("DIAGNOSIS: Claude request timeout")
+            elif "no such file or directory" in error_lower:
+                error_msg = "❌ Claude CLI not found. Please check installation."
+                logger.error("DIAGNOSIS: Claude CLI binary not found in PATH")
+            elif "permission denied" in error_lower:
+                error_msg = "❌ Permission denied running Claude CLI."
+                logger.error("DIAGNOSIS: Claude CLI permission issue")
+            elif stderr.strip() == "" and stdout.strip() == "":
+                error_msg = "❌ Claude CLI returned no output. It may need re-authentication or there's a session issue."
+                logger.error("DIAGNOSIS: Claude CLI silent failure - likely auth issue")
+            else:
+                error_msg = f"❌ Claude Code encountered an error. Check logs for details. Error preview: {stderr[:200]}"
+                logger.error("DIAGNOSIS: Unknown Claude error - check debug file")
+            
+            post_issue_comment(repo_path, issue_number, error_msg)
+            return False
+            
     finally:
         os.chdir(original_cwd)
-    
-    if not success:
-        logger.error(f"Claude Code failed to fix issue: {stderr}")
-        post_issue_comment(repo_path, issue_number, 
-            "❌ Claude Code encountered an error while attempting to fix this issue. Manual intervention may be required.")
-        return False
     
     # Run tests to verify the fix
     post_issue_comment(repo_path, issue_number, 
@@ -457,8 +611,12 @@ def process_issue(repo_path, issue):
 def scan_repositories(repos_dir, failed_issues=None):
     """Scan all repositories and process their issues"""
     issues_found = False
+    rate_limit_hit = False
     if failed_issues is None:
         failed_issues = set()
+    
+    # Track if we found any processable issues (not failed)
+    processable_issues_found = False
     
     # Iterate through all subdirectories
     for item in os.listdir(repos_dir):
@@ -472,6 +630,11 @@ def scan_repositories(repos_dir, failed_issues=None):
         
         # Get open issues
         issues = get_open_issues(repo_path)
+        
+        # Check if we hit rate limit
+        if issues is None:
+            rate_limit_hit = True
+            continue
         
         if not issues:
             logger.info(f"No open issues found in {item}")
@@ -494,20 +657,32 @@ def scan_repositories(repos_dir, failed_issues=None):
                 logger.info(f"Issue #{issue['number']} was attempted recently, skipping")
                 continue
             
+            # We found at least one issue we can process
+            processable_issues_found = True
+            
             try:
                 success = process_issue(repo_path, issue)
                 if not success:
                     failed_issues.add(issue_key)
+                    
+                # Add delay between issues to avoid rate limits
+                time.sleep(30)  # 30 second delay between issues
+                
             except Exception as e:
                 logger.error(f"Error processing issue #{issue['number']}: {e}")
                 failed_issues.add(issue_key)
                 continue
     
-    return issues_found, failed_issues
+    return issues_found, failed_issues, processable_issues_found, rate_limit_hit
 
 
 def main():
     """Main function"""
+    # Setup Claude environment first
+    if not setup_claude_environment():
+        logger.error("Failed to setup Claude CLI environment")
+        sys.exit(1)
+    
     # Load configuration
     config_file = os.environ.get('CRONCODER_CONFIG', 'config.yaml')
     config_path = os.path.join(os.path.dirname(__file__), config_file)
@@ -542,18 +717,25 @@ def main():
         
         # Main loop
         while True:
-            issues_found, failed_issues = scan_repositories(repos_dir, failed_issues)
+            issues_found, failed_issues, processable_issues_found, rate_limit_hit = scan_repositories(repos_dir, failed_issues)
             
+            # If we hit GitHub rate limit, wait longer
+            if rate_limit_hit:
+                logger.warning(f"GitHub API rate limit hit. Sleeping for {sleep_time} minutes...")
+                time.sleep(sleep_time * 60)
+                break  # Exit after sleep
+            
+            # If no issues found at all
             if not issues_found:
                 logger.info(f"No open issues found. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
                 break  # Exit after sleep
             
-            # Check if all issues have failed
-            if failed_issues and not issues_found:
-                logger.info(f"All remaining issues have failed. Sleeping for {sleep_time} minutes...")
+            # If we found issues but none are processable (all failed or recently attempted)
+            if issues_found and not processable_issues_found:
+                logger.info(f"All issues are either failed or recently attempted. Sleeping for {sleep_time} minutes...")
                 time.sleep(sleep_time * 60)
-                break
+                break  # Exit to avoid infinite loop
             
             # If issues were found and processed, loop again immediately
             logger.info("Issues were processed, checking for more...")

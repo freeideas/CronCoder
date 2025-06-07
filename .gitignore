@@ -27,3 +27,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude/AI tools
+.claude/
+.augment/
+claude-logs/
